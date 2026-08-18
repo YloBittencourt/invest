@@ -1,13 +1,17 @@
 import express from "express";
 import cors from "cors";
-import yf from "yahoo-finance2";
 import "dotenv/config";
+import { createRequire } from "module";
 
-// O bypass arquitetural: Extrai a classe original da biblioteca e força uma nova instância.
-// Isso aniquila completamente o erro de contexto do Node 22 com ESM.
-const yahooFinanceInstance = yf.default || yf;
-const YFClass = yahooFinanceInstance.constructor;
-const yahooFinance = new YFClass();
+// 1. Bypass no ESM Loader do Node.js
+const require = createRequire(import.meta.url);
+const yfModule = require("yahoo-finance2");
+
+// 2. Extração segura da Instância do Yahoo Finance
+// Se o Node entregar a classe/função, nós instanciamos com "new". 
+// Se entregar o objeto pronto, nós o usamos direto.
+const YF = yfModule.default || yfModule;
+const yahooFinance = typeof YF === "function" ? new YF() : YF;
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -51,7 +55,7 @@ app.get("/api/quote/:ticker", async (req, res) => {
         rate: d.dividends,
       }));
     } catch (divError) {
-      // Falha silenciosa: Comum para FIIs com atrasos de publicação ou ativos muito recentes
+      // Falha silenciosa: Comum em FIIs com ciclos de publicação atrasados
       console.warn(`[investpainel] Histórico de dividendos indisponível para ${symbol}`);
     }
 
