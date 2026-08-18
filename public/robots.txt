@@ -1,5 +1,4 @@
 User-agent: *
 Allow: /
 
-# TODO: trocar SEUDOMINIO.com.br pelo domínio real de produção antes de publicar
-Sitemap: https://SEUDOMINIO.com.br/sitemap.xml
+Sitemap: https://investpainel.com.br/sitemap.xml

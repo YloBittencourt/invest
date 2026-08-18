@@ -3,23 +3,21 @@
 @tailwind utilities;
 
 @layer base {
-  * {
-    @apply border-ink-border;
-  }
-
   html {
     scroll-behavior: smooth;
   }
 
   body {
-    @apply bg-ink text-text-primary font-body antialiased;
+    /* Usando classes nativas do Tailwind para fundo branco e texto escuro */
+    @apply bg-white text-slate-900 font-sans antialiased;
   }
 
   ::selection {
-    @apply bg-cta/30 text-text-primary;
+    /* Seleção de texto premium e discreta */
+    @apply bg-slate-200 text-slate-900;
   }
 
-  /* Foco visível para navegação por teclado */
+  /* Foco visível para navegação por teclado (Acessibilidade) */
   :focus-visible {
     outline: 2px solid #F0B429;
     outline-offset: 3px;

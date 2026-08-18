@@ -1,41 +1,37 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
   theme: {
     extend: {
       colors: {
+        primary: '#0F172A', 
+        muted: '#6E7889',   
+        
+        // Cobre os erros: bg-ink e border-ink-border
         ink: {
-          DEFAULT: "#0B0F14",
-          surface: "#131922",
-          border: "#1F2733",
+          DEFAULT: '#FFFFFF', // Fundo branco
+          border: '#E2E8F0',  // Borda cinza claro
         },
+        
+        // Cobre o erro: text-text-primary
         text: {
-          primary: "#F5F7FA",
-          secondary: "#8B95A5",
-          muted: "#5B6474",
+          primary: '#0F172A',
         },
-        gain: "#00D982",
-        loss: "#FF5C5C",
+
+        // Cobre o erro: bg-cta/30
         cta: {
-          DEFAULT: "#F0B429",
-          hover: "#F5C452",
-        },
+          DEFAULT: '#F0B429', // Mantive o amarelo do seu focus-visible
+        }
       },
       fontFamily: {
-        display: ["Space Grotesk", "sans-serif"],
-        body: ["Inter", "sans-serif"],
-        mono: ["JetBrains Mono", "monospace"],
-      },
-      animation: {
-        marquee: "marquee 32s linear infinite",
-      },
-      keyframes: {
-        marquee: {
-          "0%": { transform: "translateX(0%)" },
-          "100%": { transform: "translateX(-50%)" },
-        },
-      },
+        sans: ['Inter', 'system-ui', 'sans-serif'],
+        // Cobre o erro: font-body
+        body: ['Inter', 'system-ui', 'sans-serif'],
+      }
     },
   },
   plugins: [],
-};
+}

@@ -1,43 +1,36 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="pt-BR">
   <head>
     <meta charset="UTF-8" />
+    <!-- Favicon Principal e Fallbacks (Checklist Médio) -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    
+    <!-- SEO Básico (Checklist Médio: Description com ~150 caracteres) -->
+    <title>InvestPainel | Gestão Inteligente de Investimentos</title>
+    <meta name="description" content="Acompanhe sua carteira de investimentos, FIIs e ações em tempo real. Uma plataforma direta ao ponto para gerenciar seu patrimônio sem enrolação." />
 
-    <title>InvestPainel — Cotação, carteira e análise de fundos em um só lugar</title>
-    <meta
-      name="description"
-      content="Acompanhe cotações da B3 em tempo real, monte sua carteira e veja seu lucro ou prejuízo automaticamente, e analise relatórios gerenciais de fundos com IA. Tudo em português, feito para o investidor brasileiro."
-    />
-    <meta name="robots" content="index, follow" />
-
-    <!-- Open Graph -->
+    <!-- Open Graph / Facebook (Checklist Crítico) -->
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="InvestPainel — Seu painel de investimentos na B3" />
-    <meta
-      property="og:description"
-      content="Cotação em tempo real, carteira com lucro/prejuízo automático e análise de fundos com IA."
-    />
-    <meta property="og:locale" content="pt_BR" />
-    <!-- TODO: trocar SEUDOMINIO.com.br pelo domínio real de produção antes de publicar -->
-    <meta property="og:url" content="https://SEUDOMINIO.com.br/" />
-    <meta property="og:image" content="https://SEUDOMINIO.com.br/og-image.png" />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
-    <link rel="canonical" href="https://SEUDOMINIO.com.br/" />
+    <meta property="og:url" content="https://investpainel.com.br/" />
+    <meta property="og:title" content="InvestPainel | Gestão Inteligente de Investimentos" />
+    <meta property="og:description" content="Acompanhe sua carteira de investimentos, FIIs e ações em tempo real. Uma plataforma direta ao ponto para gerenciar seu patrimônio sem enrolação." />
+    <meta property="og:image" content="https://investpainel.com.br/og-image.png" />
 
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:image" content="https://SEUDOMINIO.com.br/og-image.png" />
+    <!-- Twitter (Checklist Crítico) -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:url" content="https://investpainel.com.br/" />
+    <meta property="twitter:title" content="InvestPainel | Gestão Inteligente de Investimentos" />
+    <meta property="twitter:description" content="Acompanhe sua carteira de investimentos, FIIs e ações em tempo real. Uma plataforma direta ao ponto para gerenciar seu patrimônio sem enrolação." />
+    <meta property="twitter:image" content="https://investpainel.com.br/og-image.png" />
 
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
+    <!-- Canonical URL (Checklist Crítico) -->
+    <link rel="canonical" href="https://investpainel.com.br/" />
   </head>
-  <body>
+  <body class="antialiased text-primary bg-white selection:bg-gray-200">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
