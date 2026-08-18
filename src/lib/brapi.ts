@@ -13,7 +13,8 @@ export interface Quote {
   price: number;
   changePercent: number;
   updatedAt: string;
-  dividends: Dividend[];
+  // A chave agora é opcional, refletindo a realidade da API
+  dividends?: Dividend[]; 
 }
 
 export class QuoteError extends Error {
@@ -38,8 +39,13 @@ export async function fetchQuote(ticker: string): Promise<Quote> {
   return body as Quote;
 }
 
-/** Média simples de dividendos pagos nos últimos 12 meses, a partir do histórico retornado pela Brapi. */
-export function averageDividends12m(dividends: Dividend[]): number | null {
+/** Média simples de dividendos pagos nos últimos 12 meses, com validação de nulidade. */
+export function averageDividends12m(dividends?: Dividend[]): number | null {
+  // Validação crítica: Interrompe a execução se o array não existir ou for vazio
+  if (!dividends || !Array.isArray(dividends) || dividends.length === 0) {
+    return null;
+  }
+
   const oneYearAgo = new Date();
   oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
 

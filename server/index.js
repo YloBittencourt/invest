@@ -1,81 +1,82 @@
 import express from "express";
 import cors from "cors";
+import yf from "yahoo-finance2";
 import "dotenv/config";
+
+// O bypass arquitetural: Extrai a classe original da biblioteca e força uma nova instância.
+// Isso aniquila completamente o erro de contexto do Node 22 com ESM.
+const yahooFinanceInstance = yf.default || yf;
+const YFClass = yahooFinanceInstance.constructor;
+const yahooFinance = new YFClass();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const BRAPI_TOKEN = process.env.BRAPI_TOKEN;
-
-if (!BRAPI_TOKEN) {
-  console.warn(
-    "[investpainel-server] Aviso: BRAPI_TOKEN não está definido em server/.env — as chamadas à Brapi vão falhar."
-  );
-}
 
 app.use(cors());
 
-// GET /api/quote/PETR4  → cotação atual + proventos (para a página de Cotação)
+// Rota principal de cotação (Adapter Pattern)
 app.get("/api/quote/:ticker", async (req, res) => {
-  const ticker = req.params.ticker.toUpperCase().trim();
+  const rawTicker = req.params.ticker.toUpperCase().trim();
 
-  if (!/^[A-Z0-9]{4,7}$/.test(ticker)) {
-    return res.status(400).json({ error: "Ticker inválido." });
+  // Validação estrita de formato (ex: PETR4, VGIR11, GARE11)
+  if (!/^[A-Z0-9]{4,7}$/.test(rawTicker)) {
+    return res.status(400).json({ error: "Ticker inválido. Use formatos como PETR4 ou VGIR11." });
   }
 
+  // Acopla o sufixo da B3 silenciosamente no back-end
+  const symbol = `${rawTicker}.SA`;
+
   try {
-    const url = `https://brapi.dev/api/quote/${ticker}?dividends=true`;
-    const brapiResponse = await fetch(url, {
-      headers: { Authorization: `Bearer ${BRAPI_TOKEN}` },
-    });
+    // 1. Busca os metadados e preço em tempo real
+    const quote = await yahooFinance.quote(symbol);
 
-    if (brapiResponse.status === 401) {
-      return res.status(502).json({
-        error: "Token da Brapi inválido ou expirado. Verifique server/.env.",
+    if (!quote) {
+      return res.status(404).json({ error: `Ativo "${rawTicker}" não encontrado.` });
+    }
+
+    // 2. Busca a janela de dividendos dos últimos 12 meses
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+
+    let mappedDividends = [];
+    try {
+      const historical = await yahooFinance.historical(symbol, {
+        period1: oneYearAgo.toISOString().split("T")[0],
+        events: "dividends",
       });
+      
+      // Padroniza a resposta para o contrato que o Front-end (Cotacao.tsx) já espera
+      mappedDividends = historical.map((d) => ({
+        paymentDate: d.date.toISOString(),
+        rate: d.dividends,
+      }));
+    } catch (divError) {
+      // Falha silenciosa: Comum para FIIs com atrasos de publicação ou ativos muito recentes
+      console.warn(`[investpainel] Histórico de dividendos indisponível para ${symbol}`);
     }
 
-    if (brapiResponse.status === 402) {
-      return res.status(402).json({
-        error: `"${ticker}" não está disponível no seu plano atual da Brapi (plano gratuito cobre um conjunto limitado de ativos e, para FIIs, exige o plano Pro). Veja brapi.dev/pricing para os detalhes de cobertura por plano.`,
-      });
-    }
-
-    if (brapiResponse.status === 429) {
-      return res.status(429).json({
-        error: "Limite de requisições da Brapi atingido. Tente novamente em instantes.",
-      });
-    }
-
-    if (!brapiResponse.ok) {
-      const brapiBody = await brapiResponse.json().catch(() => null);
-      console.error("[investpainel-server] Brapi retornou erro:", brapiResponse.status, brapiBody);
-      return res.status(brapiResponse.status).json({
-        error: brapiBody?.message || "Não foi possível consultar a cotação agora.",
-      });
-    }
-
-    const data = await brapiResponse.json();
-    const result = data.results?.[0];
-
-    if (!result) {
-      return res.status(404).json({ error: `Ativo "${ticker}" não encontrado.` });
-    }
-
+    // 3. Retorno do payload limpo para a Interface
     res.json({
-      symbol: result.symbol,
-      name: result.longName || result.shortName,
-      currency: result.currency,
-      price: result.regularMarketPrice,
-      changePercent: result.regularMarketChangePercent,
-      updatedAt: result.regularMarketTime,
-      dividends: result.dividendsData?.cashDividends ?? [],
+      symbol: rawTicker,
+      name: quote.longName || quote.shortName || rawTicker,
+      currency: quote.currency || "BRL",
+      price: quote.regularMarketPrice,
+      changePercent: quote.regularMarketChangePercent || 0,
+      updatedAt: quote.regularMarketTime,
+      dividends: mappedDividends,
     });
+
   } catch (err) {
-    console.error("[investpainel-server] Erro ao consultar Brapi:", err);
-    res.status(500).json({ error: "Erro interno ao consultar a cotação." });
+    console.error(`[investpainel-server] Erro em ${symbol}:`, err.message);
+    
+    if (err.message.includes("Not Found") || err.message.includes("No data")) {
+        return res.status(404).json({ error: `O ativo "${rawTicker}" não existe ou foi deslistado.` });
+    }
+
+    res.status(500).json({ error: "Erro interno ao comunicar com o provedor de dados." });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`[investpainel-server] Rodando em http://localhost:${PORT}`);
+  console.log(`[investpainel-server] Rodando em http://localhost:${PORT} | Fonte: Yahoo Finance`);
 });
