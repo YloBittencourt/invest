@@ -1,0 +1,3 @@
+# Copie para server/.env e preencha com seu token real (nunca comite o .env).
+BRAPI_TOKEN=
+PORT=3001
