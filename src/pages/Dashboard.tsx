@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { fetchQuote } from '../lib/brapi';
-// Importação do motor de Gráficos
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 
 interface Position {
@@ -13,6 +12,8 @@ interface Position {
   totalInvested: number;
   currentEquity: number;
   profitability: number;
+  estimatedMonthlyDividend: number;
+  dividendPerShare: number;
 }
 
 interface Transaction {
@@ -24,7 +25,6 @@ interface Transaction {
   date: string;
 }
 
-// Paleta de cores premium para o gráfico (Cyberpunk/Fintech)
 const CHART_COLORS = ['#3b82f6', '#10b981', '#8b5cf6', '#f43f5e', '#f59e0b', '#0ea5e9', '#14b8a6'];
 
 export function Dashboard() {
@@ -37,10 +37,12 @@ export function Dashboard() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [transactionsList, setTransactionsList] = useState<Transaction[]>([]);
   const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(true);
+  
   const [totalEquity, setTotalEquity] = useState(0);
   const [totalInvested, setTotalInvested] = useState(0);
+  const [totalMonthlyDividends, setTotalMonthlyDividends] = useState(0);
+  
   const [isDeleting, setIsDeleting] = useState<string | null>(null);
-
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   
@@ -66,6 +68,7 @@ export function Dashboard() {
         setPositions([]);
         setTotalEquity(0);
         setTotalInvested(0);
+        setTotalMonthlyDividends(0);
         setIsLoadingPortfolio(false);
         return;
       }
@@ -89,6 +92,7 @@ export function Dashboard() {
       const finalPositions: Position[] = [];
       let calcEquity = 0;
       let calcInvested = 0;
+      let calcDividends = 0;
 
       for (const tck of Object.keys(grouped)) {
         const group = grouped[tck];
@@ -96,17 +100,39 @@ export function Dashboard() {
 
         const avgPrice = group.totalCost / group.quantity;
         let currPrice = avgPrice; 
+        let dividendYieldAnnual = 0;
 
+        // ARQUITETURA DINÂMICA: Busca 100% da API com Timeout de segurança
         try {
-          const quote = await fetchQuote(tck);
-          currPrice = quote.price;
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Timeout da API')), 5000)
+          );
+          const quote: any = await Promise.race([fetchQuote(tck), timeoutPromise]);
+
+          if (quote && quote.price) {
+            currPrice = quote.price;
+          }
+          if (quote && quote.dividendYield) {
+            dividendYieldAnnual = quote.dividendYield; 
+          }
         } catch (err) {
-          console.warn(`Cotação indisponível para ${tck}.`);
+          console.warn(`[Sistema] Cotação indisponível para ${tck}. Usando fallback.`);
+        }
+
+        // FALLBACK INTELIGENTE: Se a API não enviar DY e for FII/Fiagro, estima 10.5% a.a.
+        if (dividendYieldAnnual === 0 && tck.endsWith('11')) {
+          dividendYieldAnnual = 10.5; 
         }
 
         const currentVal = group.quantity * currPrice;
+        
+        // MOTOR DE DIVIDENDOS
+        const monthlyDividend = (currentVal * (dividendYieldAnnual / 100)) / 12;
+        const divPerShare = monthlyDividend / group.quantity;
+
         calcEquity += currentVal;
         calcInvested += group.totalCost;
+        calcDividends += monthlyDividend;
 
         finalPositions.push({
           ticker: tck,
@@ -115,13 +141,16 @@ export function Dashboard() {
           currentPrice: currPrice,
           totalInvested: group.totalCost,
           currentEquity: currentVal,
-          profitability: ((currPrice / avgPrice) - 1) * 100
+          profitability: ((currPrice / avgPrice) - 1) * 100,
+          estimatedMonthlyDividend: monthlyDividend,
+          dividendPerShare: divPerShare
         });
       }
 
       setPositions(finalPositions.sort((a, b) => b.currentEquity - a.currentEquity));
       setTotalEquity(calcEquity);
       setTotalInvested(calcInvested);
+      setTotalMonthlyDividends(calcDividends);
 
     } catch (err) {
       console.error("Erro ao carregar carteira:", err);
@@ -180,17 +209,13 @@ export function Dashboard() {
   };
 
   const handleDeleteTransaction = async (transactionId: string) => {
-    const confirmDelete = window.confirm("Tem certeza que deseja excluir esta transação? Seu preço médio será recalculado.");
+    const confirmDelete = window.confirm("Tem certeza que deseja excluir esta transação? Seu patrimônio será recalculado.");
     if (!confirmDelete) return;
 
     setIsDeleting(transactionId);
 
     try {
-      const { error } = await supabase
-        .from('transactions')
-        .delete()
-        .eq('id', transactionId);
-
+      const { error } = await supabase.from('transactions').delete().eq('id', transactionId);
       if (error) throw error;
       await loadPortfolio(userId);
     } catch (error: any) {
@@ -201,7 +226,6 @@ export function Dashboard() {
     }
   };
 
-  // Funções Utilitárias
   const formatCurrency = (value: number) => 
     new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
   
@@ -216,7 +240,6 @@ export function Dashboard() {
   const totalProfitability = totalInvested > 0 ? ((totalEquity / totalInvested) - 1) * 100 : 0;
   const isGlobalGain = totalProfitability >= 0;
 
-  // Preparação de Dados para o Gráfico
   const chartData = positions.map(pos => ({
     name: pos.ticker,
     value: pos.currentEquity
@@ -225,7 +248,6 @@ export function Dashboard() {
   return (
     <div className="min-h-screen bg-[#0a0f1c] flex font-sans text-slate-300 relative">
       
-      {/* SIDEBAR INTELIGENTE (Abas) */}
       <aside className="w-64 bg-slate-950 border-r border-white/5 hidden md:flex flex-col">
         <div className="h-16 flex items-center px-6 border-b border-white/5">
           <div className="flex items-center gap-2">
@@ -265,70 +287,68 @@ export function Dashboard() {
         </div>
       </aside>
 
-      {/* ÁREA PRINCIPAL */}
       <main className="flex-1 flex flex-col h-screen overflow-y-auto">
         <header className="h-16 flex items-center justify-between px-8 border-b border-white/5 bg-[#0a0f1c]/80 backdrop-blur-md sticky top-0 z-20">
           <h2 className="text-lg font-semibold text-white">Carteira de {userName}</h2>
           <button onClick={() => setIsModalOpen(true)} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-lg shadow-blue-500/20 transition-all active:scale-95 flex items-center gap-2">
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
             Nova Transação
           </button>
         </header>
 
         <div className="p-8 max-w-6xl mx-auto w-full animate-fade-in-up">
           
-          {/* ================= ABA: VISÃO GERAL ================= */}
           {activeTab === 'overview' && (
             <>
-              {/* CARTÕES DE RESUMO */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+                
                 <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm relative overflow-hidden">
-                  <div className="absolute -right-10 -bottom-10 w-40 h-40 bg-blue-500/10 blur-3xl rounded-full"></div>
-                  <p className="text-slate-500 text-sm font-semibold mb-2 uppercase tracking-widest relative z-10">Patrimônio Total</p>
-                  <p className="text-3xl font-mono font-bold text-white tracking-tight relative z-10">
+                  <div className="absolute -right-10 -bottom-10 w-32 h-32 bg-blue-500/10 blur-3xl rounded-full"></div>
+                  <p className="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest relative z-10">Patrimônio Total</p>
+                  <p className="text-2xl font-mono font-bold text-white tracking-tight relative z-10">
                     {isLoadingPortfolio ? '...' : formatCurrency(totalEquity)}
                   </p>
                 </div>
                 
                 <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm">
-                  <p className="text-slate-500 text-sm font-semibold mb-2 uppercase tracking-widest">Valor Investido</p>
-                  <p className="text-3xl font-mono font-bold text-white tracking-tight">
+                  <p className="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest">Valor Investido</p>
+                  <p className="text-2xl font-mono font-bold text-white tracking-tight">
                     {isLoadingPortfolio ? '...' : formatCurrency(totalInvested)}
+                  </p>
+                </div>
+
+                <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm relative overflow-hidden">
+                  <div className="absolute -right-10 -bottom-10 w-32 h-32 bg-purple-500/10 blur-3xl rounded-full"></div>
+                  <p className="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest relative z-10">Média de Proventos</p>
+                  <p className="text-2xl font-mono font-bold text-purple-400 tracking-tight relative z-10">
+                    {isLoadingPortfolio ? '...' : formatCurrency(totalMonthlyDividends)}
+                    <span className="text-xs text-slate-500 font-sans ml-1 font-normal tracking-normal">/mês</span>
                   </p>
                 </div>
                 
                 <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm relative overflow-hidden">
-                  <div className={`absolute -right-10 -bottom-10 w-40 h-40 blur-3xl rounded-full ${isGlobalGain ? 'bg-emerald-500/10' : 'bg-rose-500/10'}`}></div>
-                  <p className="text-slate-500 text-sm font-semibold mb-2 uppercase tracking-widest relative z-10">Rentabilidade</p>
-                  <p className={`text-3xl font-mono font-bold tracking-tight relative z-10 ${isGlobalGain ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  <div className={`absolute -right-10 -bottom-10 w-32 h-32 blur-3xl rounded-full ${isGlobalGain ? 'bg-emerald-500/10' : 'bg-rose-500/10'}`}></div>
+                  <p className="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest relative z-10">Rentabilidade</p>
+                  <p className={`text-2xl font-mono font-bold tracking-tight relative z-10 ${isGlobalGain ? 'text-emerald-400' : 'text-rose-400'}`}>
                     {isLoadingPortfolio ? '...' : (
                       <>{isGlobalGain ? '+' : ''}{formatPercent(totalProfitability)}</>
                     )}
                   </p>
                 </div>
+
               </div>
 
-              {/* GRÁFICO E TABELA SÓ APARECEM SE TIVER ATIVOS */}
               {!isLoadingPortfolio && positions.length > 0 && (
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-                  {/* Gráfico de Donut (Recharts) */}
+                  
                   <div className="lg:col-span-1 bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm flex flex-col items-center">
                     <p className="text-slate-500 text-sm font-semibold mb-4 uppercase tracking-widest self-start w-full border-b border-white/5 pb-4">
-                      Composição da Carteira
+                      Composição
                     </p>
                     <div className="w-full h-[220px] relative">
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart>
-                          <Pie 
-                            data={chartData} 
-                            innerRadius={65} 
-                            outerRadius={90} 
-                            paddingAngle={5} 
-                            dataKey="value" 
-                            stroke="none"
-                          >
+                          <Pie data={chartData} innerRadius={65} outerRadius={90} paddingAngle={5} dataKey="value" stroke="none">
                             {chartData.map((entry, index) => (
                               <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
                             ))}
@@ -340,13 +360,11 @@ export function Dashboard() {
                           />
                         </PieChart>
                       </ResponsiveContainer>
-                      {/* Texto no meio da rosca */}
                       <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
                         <span className="text-xs text-slate-500 font-bold">Ativos</span>
                         <span className="text-2xl font-mono font-bold text-white">{positions.length}</span>
                       </div>
                     </div>
-                    {/* Legenda Customizada */}
                     <div className="w-full flex flex-wrap gap-3 mt-4 justify-center">
                       {chartData.map((entry, index) => (
                         <div key={entry.name} className="flex items-center gap-1.5 text-xs font-mono">
@@ -357,7 +375,6 @@ export function Dashboard() {
                     </div>
                   </div>
 
-                  {/* Tabela de Ativos Lado a Lado com o Gráfico */}
                   <div className="lg:col-span-2 bg-slate-900 border border-white/5 rounded-2xl overflow-hidden shadow-sm flex flex-col">
                     <p className="text-slate-500 text-sm font-semibold p-6 pb-4 uppercase tracking-widest border-b border-white/5">
                       Posições Consolidadas
@@ -371,6 +388,7 @@ export function Dashboard() {
                             <th className="px-6 py-3 text-right">Preço Médio</th>
                             <th className="px-6 py-3 text-right">Cotação Atual</th>
                             <th className="px-6 py-3 text-right">Saldo Atual</th>
+                            <th className="px-6 py-3 text-right">Proventos (Mês)</th>
                             <th className="px-6 py-3 text-right">Rentab.</th>
                           </tr>
                         </thead>
@@ -379,14 +397,27 @@ export function Dashboard() {
                             const isProfit = pos.profitability >= 0;
                             return (
                               <tr key={pos.ticker} className="hover:bg-white/[0.02] transition-colors">
-                                <td className="px-6 py-3">
+                                <td className="px-6 py-4">
                                   <span className="font-mono font-bold text-white bg-slate-800 px-2 py-1 rounded border border-white/5">{pos.ticker}</span>
                                 </td>
-                                <td className="px-6 py-3 text-right font-mono text-slate-300">{pos.quantity}</td>
-                                <td className="px-6 py-3 text-right font-mono text-slate-400">{formatCurrency(pos.averagePrice)}</td>
-                                <td className="px-6 py-3 text-right font-mono text-white">{formatCurrency(pos.currentPrice)}</td>
-                                <td className="px-6 py-3 text-right font-mono font-bold text-white">{formatCurrency(pos.currentEquity)}</td>
-                                <td className="px-6 py-3 text-right">
+                                <td className="px-6 py-4 text-right font-mono text-slate-300">{pos.quantity}</td>
+                                <td className="px-6 py-4 text-right font-mono text-slate-400">{formatCurrency(pos.averagePrice)}</td>
+                                <td className="px-6 py-4 text-right font-mono text-white">{formatCurrency(pos.currentPrice)}</td>
+                                <td className="px-6 py-4 text-right font-mono font-bold text-white">{formatCurrency(pos.currentEquity)}</td>
+                                
+                                {/* Célula Dupla de Proventos Dinâmica */}
+                                <td className="px-6 py-4 text-right flex flex-col items-end justify-center">
+                                  <span className="font-mono font-medium text-purple-400">
+                                    {pos.estimatedMonthlyDividend > 0 ? formatCurrency(pos.estimatedMonthlyDividend) : '-'}
+                                  </span>
+                                  {pos.dividendPerShare > 0 && (
+                                    <span className="text-[10px] text-slate-500 font-mono mt-0.5">
+                                      {formatCurrency(pos.dividendPerShare)} / cota
+                                    </span>
+                                  )}
+                                </td>
+
+                                <td className="px-6 py-4 text-right">
                                   <span className={`inline-flex font-mono font-bold px-2 py-1 rounded-md text-xs ${isProfit ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
                                     {isProfit ? '+' : ''}{formatPercent(pos.profitability)}
                                   </span>
@@ -401,7 +432,6 @@ export function Dashboard() {
                 </div>
               )}
 
-              {/* EMPTY STATE (Se não tiver ativos nem estiver carregando) */}
               {isLoadingPortfolio && (
                 <div className="w-full h-64 flex items-center justify-center">
                    <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
@@ -425,7 +455,6 @@ export function Dashboard() {
             </>
           )}
 
-          {/* ================= ABA: TRANSAÇÕES (EXTRATO) ================= */}
           {activeTab === 'transactions' && (
             <div className="bg-slate-900 border border-white/5 rounded-2xl overflow-hidden shadow-xl">
               <div className="p-6 border-b border-white/5 flex items-center justify-between bg-slate-950/30">
@@ -471,12 +500,7 @@ export function Dashboard() {
                           <td className="px-6 py-4 text-right font-mono text-slate-400">{formatCurrency(tx.price)}</td>
                           <td className="px-6 py-4 text-right font-mono font-bold text-white">{formatCurrency(tx.quantity * tx.price)}</td>
                           <td className="px-6 py-4 text-center">
-                            <button 
-                              onClick={() => handleDeleteTransaction(tx.id)}
-                              disabled={isDeleting === tx.id}
-                              className="p-2 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors disabled:opacity-50"
-                              title="Excluir transação"
-                            >
+                            <button onClick={() => handleDeleteTransaction(tx.id)} disabled={isDeleting === tx.id} className="p-2 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors disabled:opacity-50" title="Excluir transação">
                               {isDeleting === tx.id ? (
                                 <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
                               ) : (
@@ -496,9 +520,9 @@ export function Dashboard() {
         </div>
       </main>
 
-      {/* MODAL DE NOVA TRANSAÇÃO */}
+      {/* MODAL BLINDADO COM Z-[100] */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm transition-opacity" onClick={() => setIsModalOpen(false)}></div>
           
           <div className="relative bg-slate-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-fade-in-up">
