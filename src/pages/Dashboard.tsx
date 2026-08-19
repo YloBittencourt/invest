@@ -2,8 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { fetchQuote } from '../lib/brapi';
+// Importação do motor de Gráficos
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 
-// Tipagem da Carteira Consolidada
 interface Position {
   ticker: string;
   quantity: number;
@@ -14,7 +15,6 @@ interface Position {
   profitability: number;
 }
 
-// Tipagem do Histórico de Transações (Extrato)
 interface Transaction {
   id: string;
   ticker: string;
@@ -24,33 +24,31 @@ interface Transaction {
   date: string;
 }
 
+// Paleta de cores premium para o gráfico (Cyberpunk/Fintech)
+const CHART_COLORS = ['#3b82f6', '#10b981', '#8b5cf6', '#f43f5e', '#f59e0b', '#0ea5e9', '#14b8a6'];
+
 export function Dashboard() {
   const navigate = useNavigate();
   
-  // Estados do Usuário e Navegação
   const [userName, setUserName] = useState<string>('');
   const [userId, setUserId] = useState<string>('');
-  const [activeTab, setActiveTab] = useState<'overview' | 'transactions'>('overview'); // <-- Novo Estado de Abas
+  const [activeTab, setActiveTab] = useState<'overview' | 'transactions'>('overview');
 
-  // Estados da Carteira e Histórico
   const [positions, setPositions] = useState<Position[]>([]);
-  const [transactionsList, setTransactionsList] = useState<Transaction[]>([]); // <-- Guarda o extrato
+  const [transactionsList, setTransactionsList] = useState<Transaction[]>([]);
   const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(true);
   const [totalEquity, setTotalEquity] = useState(0);
   const [totalInvested, setTotalInvested] = useState(0);
-  const [isDeleting, setIsDeleting] = useState<string | null>(null); // <-- Estado de loading para o botão excluir
+  const [isDeleting, setIsDeleting] = useState<string | null>(null);
 
-  // Estados do Modal
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   
-  // Estados do Formulário
   const [ticker, setTicker] = useState('');
   const [type, setType] = useState<'BUY' | 'SELL'>('BUY');
   const [quantity, setQuantity] = useState('');
   const [price, setPrice] = useState('');
 
-  // 1. Função que busca e consolida a carteira
   const loadPortfolio = async (currentUserId: string) => {
     setIsLoadingPortfolio(true);
     try {
@@ -58,11 +56,10 @@ export function Dashboard() {
         .from('transactions')
         .select('*')
         .eq('user_id', currentUserId)
-        .order('date', { ascending: false }); // Ordena da mais recente para a mais antiga
+        .order('date', { ascending: false });
 
       if (error) throw error;
 
-      // Guarda o extrato bruto para a aba de Transações
       setTransactionsList(transactions || []);
 
       if (!transactions || transactions.length === 0) {
@@ -73,7 +70,6 @@ export function Dashboard() {
         return;
       }
 
-      // Consolida as transações
       const grouped: Record<string, { quantity: number; totalCost: number }> = {};
       
       transactions.forEach((tx) => {
@@ -151,7 +147,6 @@ export function Dashboard() {
     navigate('/login');
   };
 
-  // 2. Salvar nova transação
   const handleAddTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
@@ -184,7 +179,6 @@ export function Dashboard() {
     }
   };
 
-  // 3. Deletar Transação (Caminho 2 Implementado)
   const handleDeleteTransaction = async (transactionId: string) => {
     const confirmDelete = window.confirm("Tem certeza que deseja excluir esta transação? Seu preço médio será recalculado.");
     if (!confirmDelete) return;
@@ -198,8 +192,6 @@ export function Dashboard() {
         .eq('id', transactionId);
 
       if (error) throw error;
-
-      // Recarrega o portfólio para atualizar saldos e tabelas
       await loadPortfolio(userId);
     } catch (error: any) {
       console.error("Erro ao deletar:", error.message);
@@ -209,7 +201,7 @@ export function Dashboard() {
     }
   };
 
-  // Funções utilitárias de formatação
+  // Funções Utilitárias
   const formatCurrency = (value: number) => 
     new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
   
@@ -223,6 +215,12 @@ export function Dashboard() {
 
   const totalProfitability = totalInvested > 0 ? ((totalEquity / totalInvested) - 1) * 100 : 0;
   const isGlobalGain = totalProfitability >= 0;
+
+  // Preparação de Dados para o Gráfico
+  const chartData = positions.map(pos => ({
+    name: pos.ticker,
+    value: pos.currentEquity
+  }));
 
   return (
     <div className="min-h-screen bg-[#0a0f1c] flex font-sans text-slate-300 relative">
@@ -269,7 +267,7 @@ export function Dashboard() {
 
       {/* ÁREA PRINCIPAL */}
       <main className="flex-1 flex flex-col h-screen overflow-y-auto">
-        <header className="h-16 flex items-center justify-between px-8 border-b border-white/5 bg-[#0a0f1c]/80 backdrop-blur-md sticky top-0 z-10">
+        <header className="h-16 flex items-center justify-between px-8 border-b border-white/5 bg-[#0a0f1c]/80 backdrop-blur-md sticky top-0 z-20">
           <h2 className="text-lg font-semibold text-white">Carteira de {userName}</h2>
           <button onClick={() => setIsModalOpen(true)} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-lg shadow-blue-500/20 transition-all active:scale-95 flex items-center gap-2">
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -312,12 +310,105 @@ export function Dashboard() {
                 </div>
               </div>
 
-              {/* TABELA DE ATIVOS */}
-              {isLoadingPortfolio ? (
+              {/* GRÁFICO E TABELA SÓ APARECEM SE TIVER ATIVOS */}
+              {!isLoadingPortfolio && positions.length > 0 && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+                  {/* Gráfico de Donut (Recharts) */}
+                  <div className="lg:col-span-1 bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm flex flex-col items-center">
+                    <p className="text-slate-500 text-sm font-semibold mb-4 uppercase tracking-widest self-start w-full border-b border-white/5 pb-4">
+                      Composição da Carteira
+                    </p>
+                    <div className="w-full h-[220px] relative">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie 
+                            data={chartData} 
+                            innerRadius={65} 
+                            outerRadius={90} 
+                            paddingAngle={5} 
+                            dataKey="value" 
+                            stroke="none"
+                          >
+                            {chartData.map((entry, index) => (
+                              <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+                            ))}
+                          </Pie>
+                          <Tooltip 
+                            formatter={(value: number) => formatCurrency(value)}
+                            contentStyle={{ backgroundColor: '#020617', borderColor: '#1e293b', color: '#f8fafc', borderRadius: '0.75rem', padding: '12px' }}
+                            itemStyle={{ color: '#e2e8f0', fontWeight: 'bold' }}
+                          />
+                        </PieChart>
+                      </ResponsiveContainer>
+                      {/* Texto no meio da rosca */}
+                      <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                        <span className="text-xs text-slate-500 font-bold">Ativos</span>
+                        <span className="text-2xl font-mono font-bold text-white">{positions.length}</span>
+                      </div>
+                    </div>
+                    {/* Legenda Customizada */}
+                    <div className="w-full flex flex-wrap gap-3 mt-4 justify-center">
+                      {chartData.map((entry, index) => (
+                        <div key={entry.name} className="flex items-center gap-1.5 text-xs font-mono">
+                          <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: CHART_COLORS[index % CHART_COLORS.length] }}></div>
+                          <span className="text-slate-400">{entry.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Tabela de Ativos Lado a Lado com o Gráfico */}
+                  <div className="lg:col-span-2 bg-slate-900 border border-white/5 rounded-2xl overflow-hidden shadow-sm flex flex-col">
+                    <p className="text-slate-500 text-sm font-semibold p-6 pb-4 uppercase tracking-widest border-b border-white/5">
+                      Posições Consolidadas
+                    </p>
+                    <div className="overflow-x-auto flex-1">
+                      <table className="w-full text-left text-sm whitespace-nowrap">
+                        <thead className="uppercase tracking-wider border-b border-white/5 bg-slate-950/50 text-slate-500 text-[10px] font-bold">
+                          <tr>
+                            <th className="px-6 py-3">Ativo</th>
+                            <th className="px-6 py-3 text-right">Qtd</th>
+                            <th className="px-6 py-3 text-right">Preço Médio</th>
+                            <th className="px-6 py-3 text-right">Cotação Atual</th>
+                            <th className="px-6 py-3 text-right">Saldo Atual</th>
+                            <th className="px-6 py-3 text-right">Rentab.</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/5">
+                          {positions.map((pos) => {
+                            const isProfit = pos.profitability >= 0;
+                            return (
+                              <tr key={pos.ticker} className="hover:bg-white/[0.02] transition-colors">
+                                <td className="px-6 py-3">
+                                  <span className="font-mono font-bold text-white bg-slate-800 px-2 py-1 rounded border border-white/5">{pos.ticker}</span>
+                                </td>
+                                <td className="px-6 py-3 text-right font-mono text-slate-300">{pos.quantity}</td>
+                                <td className="px-6 py-3 text-right font-mono text-slate-400">{formatCurrency(pos.averagePrice)}</td>
+                                <td className="px-6 py-3 text-right font-mono text-white">{formatCurrency(pos.currentPrice)}</td>
+                                <td className="px-6 py-3 text-right font-mono font-bold text-white">{formatCurrency(pos.currentEquity)}</td>
+                                <td className="px-6 py-3 text-right">
+                                  <span className={`inline-flex font-mono font-bold px-2 py-1 rounded-md text-xs ${isProfit ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                                    {isProfit ? '+' : ''}{formatPercent(pos.profitability)}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* EMPTY STATE (Se não tiver ativos nem estiver carregando) */}
+              {isLoadingPortfolio && (
                 <div className="w-full h-64 flex items-center justify-center">
                    <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
                 </div>
-              ) : positions.length === 0 ? (
+              )}
+              
+              {!isLoadingPortfolio && positions.length === 0 && (
                 <div className="w-full bg-slate-900/50 border border-white/5 border-dashed rounded-3xl p-12 flex flex-col items-center justify-center text-center">
                   <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mb-4 border border-white/5">
                     <svg className="w-8 h-8 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -329,44 +420,6 @@ export function Dashboard() {
                   <button onClick={() => setIsModalOpen(true)} className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-medium transition-colors border border-white/10 shadow-sm">
                     Registrar primeira transação
                   </button>
-                </div>
-              ) : (
-                <div className="bg-slate-900 border border-white/5 rounded-2xl overflow-hidden shadow-xl">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-sm whitespace-nowrap">
-                      <thead className="uppercase tracking-wider border-b border-white/5 bg-slate-950/50 text-slate-500 text-[11px] font-bold">
-                        <tr>
-                          <th className="px-6 py-4">Ativo</th>
-                          <th className="px-6 py-4 text-right">Quantidade</th>
-                          <th className="px-6 py-4 text-right">Preço Médio</th>
-                          <th className="px-6 py-4 text-right">Cotação Atual</th>
-                          <th className="px-6 py-4 text-right">Saldo Atual</th>
-                          <th className="px-6 py-4 text-right">Rentabilidade</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-white/5">
-                        {positions.map((pos) => {
-                          const isProfit = pos.profitability >= 0;
-                          return (
-                            <tr key={pos.ticker} className="hover:bg-white/[0.02] transition-colors">
-                              <td className="px-6 py-4">
-                                <span className="font-mono font-bold text-white bg-slate-800 px-2 py-1 rounded border border-white/5">{pos.ticker}</span>
-                              </td>
-                              <td className="px-6 py-4 text-right font-mono text-slate-300">{pos.quantity}</td>
-                              <td className="px-6 py-4 text-right font-mono text-slate-400">{formatCurrency(pos.averagePrice)}</td>
-                              <td className="px-6 py-4 text-right font-mono text-white">{formatCurrency(pos.currentPrice)}</td>
-                              <td className="px-6 py-4 text-right font-mono font-bold text-white">{formatCurrency(pos.currentEquity)}</td>
-                              <td className="px-6 py-4 text-right">
-                                <span className={`inline-flex font-mono font-bold px-2 py-1 rounded-md text-xs ${isProfit ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
-                                  {isProfit ? '+' : ''}{formatPercent(pos.profitability)}
-                                </span>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
                 </div>
               )}
             </>
@@ -445,7 +498,7 @@ export function Dashboard() {
 
       {/* MODAL DE NOVA TRANSAÇÃO */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm transition-opacity" onClick={() => setIsModalOpen(false)}></div>
           
           <div className="relative bg-slate-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-fade-in-up">
