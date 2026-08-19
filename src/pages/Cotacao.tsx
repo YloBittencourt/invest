@@ -201,6 +201,6 @@ export function Cotacao() {
 
         </div>
       </main>
-    </div>
+    </div>   
   );
 }
