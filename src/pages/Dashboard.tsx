@@ -1,168 +1,492 @@
-import { Link } from "react-router-dom";
+import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { supabase } from '../lib/supabase';
+import { fetchQuote } from '../lib/brapi';
+
+// Tipagem da Carteira Consolidada
+interface Position {
+  ticker: string;
+  quantity: number;
+  averagePrice: number;
+  currentPrice: number;
+  totalInvested: number;
+  currentEquity: number;
+  profitability: number;
+}
+
+// Tipagem do Histórico de Transações (Extrato)
+interface Transaction {
+  id: string;
+  ticker: string;
+  type: 'BUY' | 'SELL';
+  quantity: number;
+  price: number;
+  date: string;
+}
 
 export function Dashboard() {
-  // Dados fictícios para ancoragem visual da interface
-  const mockPatrimonio = 124560.80;
-  const mockVariacaoDia = 345.20;
-  const mockProventosMes = 850.45;
+  const navigate = useNavigate();
+  
+  // Estados do Usuário e Navegação
+  const [userName, setUserName] = useState<string>('');
+  const [userId, setUserId] = useState<string>('');
+  const [activeTab, setActiveTab] = useState<'overview' | 'transactions'>('overview'); // <-- Novo Estado de Abas
 
-  const mockAtivos = [
-    { ticker: "VGIR11", tipo: "FII", preco: 9.85, variacao: 0.12, saldo: 15400.00 },
-    { ticker: "GARE11", tipo: "FII", preco: 9.20, variacao: -0.45, saldo: 8200.00 },
-    { ticker: "PETR4", tipo: "Ação", preco: 38.40, variacao: 1.25, saldo: 24500.00 },
-    { ticker: "IVVB11", tipo: "ETF", preco: 295.10, variacao: 0.80, saldo: 14755.00 },
-  ];
+  // Estados da Carteira e Histórico
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [transactionsList, setTransactionsList] = useState<Transaction[]>([]); // <-- Guarda o extrato
+  const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(true);
+  const [totalEquity, setTotalEquity] = useState(0);
+  const [totalInvested, setTotalInvested] = useState(0);
+  const [isDeleting, setIsDeleting] = useState<string | null>(null); // <-- Estado de loading para o botão excluir
+
+  // Estados do Modal
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  
+  // Estados do Formulário
+  const [ticker, setTicker] = useState('');
+  const [type, setType] = useState<'BUY' | 'SELL'>('BUY');
+  const [quantity, setQuantity] = useState('');
+  const [price, setPrice] = useState('');
+
+  // 1. Função que busca e consolida a carteira
+  const loadPortfolio = async (currentUserId: string) => {
+    setIsLoadingPortfolio(true);
+    try {
+      const { data: transactions, error } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('user_id', currentUserId)
+        .order('date', { ascending: false }); // Ordena da mais recente para a mais antiga
+
+      if (error) throw error;
+
+      // Guarda o extrato bruto para a aba de Transações
+      setTransactionsList(transactions || []);
+
+      if (!transactions || transactions.length === 0) {
+        setPositions([]);
+        setTotalEquity(0);
+        setTotalInvested(0);
+        setIsLoadingPortfolio(false);
+        return;
+      }
+
+      // Consolida as transações
+      const grouped: Record<string, { quantity: number; totalCost: number }> = {};
+      
+      transactions.forEach((tx) => {
+        if (!grouped[tx.ticker]) {
+          grouped[tx.ticker] = { quantity: 0, totalCost: 0 };
+        }
+        
+        if (tx.type === 'BUY') {
+          grouped[tx.ticker].quantity += tx.quantity;
+          grouped[tx.ticker].totalCost += (tx.quantity * tx.price);
+        } else if (tx.type === 'SELL') {
+          grouped[tx.ticker].quantity -= tx.quantity;
+          grouped[tx.ticker].totalCost -= (tx.quantity * tx.price);
+        }
+      });
+
+      const finalPositions: Position[] = [];
+      let calcEquity = 0;
+      let calcInvested = 0;
+
+      for (const tck of Object.keys(grouped)) {
+        const group = grouped[tck];
+        if (group.quantity <= 0) continue; 
+
+        const avgPrice = group.totalCost / group.quantity;
+        let currPrice = avgPrice; 
+
+        try {
+          const quote = await fetchQuote(tck);
+          currPrice = quote.price;
+        } catch (err) {
+          console.warn(`Cotação indisponível para ${tck}.`);
+        }
+
+        const currentVal = group.quantity * currPrice;
+        calcEquity += currentVal;
+        calcInvested += group.totalCost;
+
+        finalPositions.push({
+          ticker: tck,
+          quantity: group.quantity,
+          averagePrice: avgPrice,
+          currentPrice: currPrice,
+          totalInvested: group.totalCost,
+          currentEquity: currentVal,
+          profitability: ((currPrice / avgPrice) - 1) * 100
+        });
+      }
+
+      setPositions(finalPositions.sort((a, b) => b.currentEquity - a.currentEquity));
+      setTotalEquity(calcEquity);
+      setTotalInvested(calcInvested);
+
+    } catch (err) {
+      console.error("Erro ao carregar carteira:", err);
+    } finally {
+      setIsLoadingPortfolio(false);
+    }
+  };
+
+  useEffect(() => {
+    const initDashboard = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        setUserId(user.id);
+        setUserName(user.user_metadata?.full_name || user.email?.split('@')[0] || 'Investidor');
+        await loadPortfolio(user.id);
+      }
+    };
+    initDashboard();
+  }, []);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    navigate('/login');
+  };
+
+  // 2. Salvar nova transação
+  const handleAddTransaction = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSubmitting(true);
+
+    try {
+      if (!ticker || !quantity || !price) throw new Error("Preencha todos os campos.");
+
+      const { error } = await supabase.from('transactions').insert([
+        {
+          user_id: userId,
+          ticker: ticker.toUpperCase().trim(),
+          type: type,
+          quantity: parseInt(quantity),
+          price: parseFloat(price.replace(',', '.')),
+          date: new Date().toISOString().split('T')[0]
+        }
+      ]);
+
+      if (error) throw error;
+
+      setTicker(''); setQuantity(''); setPrice('');
+      setIsModalOpen(false);
+      await loadPortfolio(userId);
+
+    } catch (error: any) {
+      console.error("Erro ao salvar:", error.message);
+      alert("Erro ao salvar a transação.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // 3. Deletar Transação (Caminho 2 Implementado)
+  const handleDeleteTransaction = async (transactionId: string) => {
+    const confirmDelete = window.confirm("Tem certeza que deseja excluir esta transação? Seu preço médio será recalculado.");
+    if (!confirmDelete) return;
+
+    setIsDeleting(transactionId);
+
+    try {
+      const { error } = await supabase
+        .from('transactions')
+        .delete()
+        .eq('id', transactionId);
+
+      if (error) throw error;
+
+      // Recarrega o portfólio para atualizar saldos e tabelas
+      await loadPortfolio(userId);
+    } catch (error: any) {
+      console.error("Erro ao deletar:", error.message);
+      alert("Falha ao excluir a transação.");
+    } finally {
+      setIsDeleting(null);
+    }
+  };
+
+  // Funções utilitárias de formatação
+  const formatCurrency = (value: number) => 
+    new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+  
+  const formatPercent = (value: number) => 
+    new Intl.NumberFormat('pt-BR', { style: 'percent', minimumFractionDigits: 2 }).format(value / 100);
+
+  const formatDate = (dateString: string) => {
+    const [year, month, day] = dateString.split('-');
+    return `${day}/${month}/${year}`;
+  };
+
+  const totalProfitability = totalInvested > 0 ? ((totalEquity / totalInvested) - 1) * 100 : 0;
+  const isGlobalGain = totalProfitability >= 0;
 
   return (
-    <div className="min-h-screen bg-slate-950 flex font-sans text-slate-300 selection:bg-blue-500/30">
+    <div className="min-h-screen bg-[#0a0f1c] flex font-sans text-slate-300 relative">
       
-      {/* SIDEBAR (Menu Lateral) */}
-      <aside className="w-64 bg-slate-900 border-r border-white/5 hidden md:flex flex-col">
-        <div className="h-20 flex items-center px-8 border-b border-white/5">
-          <Link to="/" className="font-extrabold text-xl tracking-tight text-white flex items-center gap-3">
-            <div className="w-6 h-6 bg-gradient-to-br from-blue-500 to-emerald-400 rounded-md shadow-[0_0_10px_rgba(52,211,153,0.2)]"></div>
-            InvestPainel
-          </Link>
+      {/* SIDEBAR INTELIGENTE (Abas) */}
+      <aside className="w-64 bg-slate-950 border-r border-white/5 hidden md:flex flex-col">
+        <div className="h-16 flex items-center px-6 border-b border-white/5">
+          <div className="flex items-center gap-2">
+            <div className="w-5 h-5 bg-gradient-to-br from-blue-500 to-emerald-400 rounded-md"></div>
+            <span className="font-extrabold text-lg text-white tracking-tight">InvestPainel</span>
+          </div>
         </div>
-
-        <nav className="flex-1 px-4 py-8 space-y-2">
-          <a href="#" className="flex items-center gap-3 px-4 py-3 rounded-lg bg-white/5 text-white font-medium border border-white/5">
-            <svg className="w-5 h-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        
+        <nav className="flex-1 px-4 py-6 space-y-2">
+          <button 
+            onClick={() => setActiveTab('overview')}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg font-medium transition-colors ${activeTab === 'overview' ? 'bg-blue-600/10 text-blue-400 border border-blue-500/20' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
             </svg>
             Visão Geral
-          </a>
-          <a href="#" className="flex items-center gap-3 px-4 py-3 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
+          </button>
+          <button 
+            onClick={() => setActiveTab('transactions')}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg font-medium transition-colors ${activeTab === 'transactions' ? 'bg-blue-600/10 text-blue-400 border border-blue-500/20' : 'text-slate-500 hover:text-white hover:bg-white/5'}`}
+          >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
             </svg>
-            Carteira
-          </a>
-          <a href="#" className="flex items-center gap-3 px-4 py-3 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            Proventos
-          </a>
+            Transações
+          </button>
         </nav>
 
         <div className="p-4 border-t border-white/5">
-          <button className="flex items-center gap-3 px-4 py-3 w-full rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors">
-            <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center border border-white/10">
-              <span className="text-xs font-bold text-white">YB</span>
-            </div>
-            <div className="text-left">
-              <p className="text-sm font-medium text-white">Ylo Bittencourt</p>
-              <p className="text-xs text-slate-500">Plano Grátis</p>
-            </div>
+          <button onClick={handleLogout} className="flex items-center gap-3 px-3 py-2 w-full text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg font-medium transition-colors">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
+            Sair da conta
           </button>
         </div>
       </aside>
 
       {/* ÁREA PRINCIPAL */}
-      <main className="flex-1 flex flex-col h-screen overflow-hidden">
-        
-        {/* TOPBAR */}
-        <header className="h-20 bg-slate-950/80 backdrop-blur-md border-b border-white/5 flex items-center justify-between px-8 sticky top-0 z-40">
-          <h1 className="text-2xl font-bold text-white tracking-tight">Visão Geral</h1>
-          <div className="flex items-center gap-4">
-            <Link to="/cotacao" className="text-sm font-medium bg-white/5 hover:bg-white/10 border border-white/10 text-white px-4 py-2 rounded-lg transition-colors">
-              Explorar Ativos
-            </Link>
-          </div>
+      <main className="flex-1 flex flex-col h-screen overflow-y-auto">
+        <header className="h-16 flex items-center justify-between px-8 border-b border-white/5 bg-[#0a0f1c]/80 backdrop-blur-md sticky top-0 z-10">
+          <h2 className="text-lg font-semibold text-white">Carteira de {userName}</h2>
+          <button onClick={() => setIsModalOpen(true)} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-lg shadow-blue-500/20 transition-all active:scale-95 flex items-center gap-2">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            Nova Transação
+          </button>
         </header>
 
-        {/* CONTEÚDO SCROLLÁVEL */}
-        <div className="flex-1 overflow-y-auto p-8">
+        <div className="p-8 max-w-6xl mx-auto w-full animate-fade-in-up">
           
-          {/* CARDS DE RESUMO */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-            {/* Patrimônio */}
-            <div className="bg-slate-900 border border-white/5 rounded-2xl p-6 shadow-sm relative overflow-hidden">
-              <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/10 blur-2xl rounded-full -mr-10 -mt-10 pointer-events-none"></div>
-              <h2 className="text-sm font-semibold text-slate-400 mb-2">Patrimônio Total</h2>
-              <p className="text-3xl font-bold text-white tabular-nums tracking-tight">
-                <span className="text-xl text-slate-500 mr-1">R$</span>
-                {mockPatrimonio.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-              </p>
-            </div>
+          {/* ================= ABA: VISÃO GERAL ================= */}
+          {activeTab === 'overview' && (
+            <>
+              {/* CARTÕES DE RESUMO */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm relative overflow-hidden">
+                  <div className="absolute -right-10 -bottom-10 w-40 h-40 bg-blue-500/10 blur-3xl rounded-full"></div>
+                  <p className="text-slate-500 text-sm font-semibold mb-2 uppercase tracking-widest relative z-10">Patrimônio Total</p>
+                  <p className="text-3xl font-mono font-bold text-white tracking-tight relative z-10">
+                    {isLoadingPortfolio ? '...' : formatCurrency(totalEquity)}
+                  </p>
+                </div>
+                
+                <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm">
+                  <p className="text-slate-500 text-sm font-semibold mb-2 uppercase tracking-widest">Valor Investido</p>
+                  <p className="text-3xl font-mono font-bold text-white tracking-tight">
+                    {isLoadingPortfolio ? '...' : formatCurrency(totalInvested)}
+                  </p>
+                </div>
+                
+                <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm relative overflow-hidden">
+                  <div className={`absolute -right-10 -bottom-10 w-40 h-40 blur-3xl rounded-full ${isGlobalGain ? 'bg-emerald-500/10' : 'bg-rose-500/10'}`}></div>
+                  <p className="text-slate-500 text-sm font-semibold mb-2 uppercase tracking-widest relative z-10">Rentabilidade</p>
+                  <p className={`text-3xl font-mono font-bold tracking-tight relative z-10 ${isGlobalGain ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {isLoadingPortfolio ? '...' : (
+                      <>{isGlobalGain ? '+' : ''}{formatPercent(totalProfitability)}</>
+                    )}
+                  </p>
+                </div>
+              </div>
 
-            {/* Variação Dia */}
-            <div className="bg-slate-900 border border-white/5 rounded-2xl p-6 shadow-sm relative overflow-hidden">
-              <h2 className="text-sm font-semibold text-slate-400 mb-2">Variação no Dia</h2>
-              <div className="flex items-baseline gap-3">
-                <p className="text-3xl font-bold text-emerald-400 tabular-nums tracking-tight">
-                  <span className="text-xl mr-1">+ R$</span>
-                  {mockVariacaoDia.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                </p>
-                <span className="text-sm font-medium text-emerald-500 bg-emerald-500/10 px-2 py-0.5 rounded">
-                  +0.28%
+              {/* TABELA DE ATIVOS */}
+              {isLoadingPortfolio ? (
+                <div className="w-full h-64 flex items-center justify-center">
+                   <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                </div>
+              ) : positions.length === 0 ? (
+                <div className="w-full bg-slate-900/50 border border-white/5 border-dashed rounded-3xl p-12 flex flex-col items-center justify-center text-center">
+                  <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mb-4 border border-white/5">
+                    <svg className="w-8 h-8 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                    </svg>
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">Nenhum ativo cadastrado</h3>
+                  <p className="text-slate-400 max-w-md mx-auto mb-6">Comece a construir sua carteira registrando sua primeira compra.</p>
+                  <button onClick={() => setIsModalOpen(true)} className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-medium transition-colors border border-white/10 shadow-sm">
+                    Registrar primeira transação
+                  </button>
+                </div>
+              ) : (
+                <div className="bg-slate-900 border border-white/5 rounded-2xl overflow-hidden shadow-xl">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm whitespace-nowrap">
+                      <thead className="uppercase tracking-wider border-b border-white/5 bg-slate-950/50 text-slate-500 text-[11px] font-bold">
+                        <tr>
+                          <th className="px-6 py-4">Ativo</th>
+                          <th className="px-6 py-4 text-right">Quantidade</th>
+                          <th className="px-6 py-4 text-right">Preço Médio</th>
+                          <th className="px-6 py-4 text-right">Cotação Atual</th>
+                          <th className="px-6 py-4 text-right">Saldo Atual</th>
+                          <th className="px-6 py-4 text-right">Rentabilidade</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5">
+                        {positions.map((pos) => {
+                          const isProfit = pos.profitability >= 0;
+                          return (
+                            <tr key={pos.ticker} className="hover:bg-white/[0.02] transition-colors">
+                              <td className="px-6 py-4">
+                                <span className="font-mono font-bold text-white bg-slate-800 px-2 py-1 rounded border border-white/5">{pos.ticker}</span>
+                              </td>
+                              <td className="px-6 py-4 text-right font-mono text-slate-300">{pos.quantity}</td>
+                              <td className="px-6 py-4 text-right font-mono text-slate-400">{formatCurrency(pos.averagePrice)}</td>
+                              <td className="px-6 py-4 text-right font-mono text-white">{formatCurrency(pos.currentPrice)}</td>
+                              <td className="px-6 py-4 text-right font-mono font-bold text-white">{formatCurrency(pos.currentEquity)}</td>
+                              <td className="px-6 py-4 text-right">
+                                <span className={`inline-flex font-mono font-bold px-2 py-1 rounded-md text-xs ${isProfit ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                                  {isProfit ? '+' : ''}{formatPercent(pos.profitability)}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* ================= ABA: TRANSAÇÕES (EXTRATO) ================= */}
+          {activeTab === 'transactions' && (
+            <div className="bg-slate-900 border border-white/5 rounded-2xl overflow-hidden shadow-xl">
+              <div className="p-6 border-b border-white/5 flex items-center justify-between bg-slate-950/30">
+                <h3 className="font-bold text-white">Histórico de Movimentações</h3>
+                <span className="text-xs font-medium text-slate-500 px-3 py-1 bg-slate-800 rounded-full border border-white/5">
+                  {transactionsList.length} Registros
                 </span>
               </div>
-            </div>
-
-            {/* Proventos */}
-            <div className="bg-slate-900 border border-white/5 rounded-2xl p-6 shadow-sm relative overflow-hidden">
-              <h2 className="text-sm font-semibold text-slate-400 mb-2">Proventos no Mês</h2>
-              <p className="text-3xl font-bold text-white tabular-nums tracking-tight">
-                <span className="text-xl text-slate-500 mr-1">R$</span>
-                {mockProventosMes.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-              </p>
-            </div>
-          </div>
-
-          {/* TABELA DE ATIVOS */}
-          <div className="bg-slate-900 border border-white/5 rounded-2xl overflow-hidden shadow-sm">
-            <div className="px-6 py-5 border-b border-white/5 flex justify-between items-center bg-white/[0.02]">
-              <h3 className="text-lg font-bold text-white">Sua Carteira</h3>
-              <button className="text-sm text-blue-400 font-medium hover:text-blue-300 transition-colors">
-                Ver todos
-              </button>
-            </div>
-            
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-white/5 text-xs uppercase tracking-widest text-slate-500 font-semibold bg-slate-900/50">
-                    <th className="px-6 py-4">Ativo</th>
-                    <th className="px-6 py-4">Tipo</th>
-                    <th className="px-6 py-4 text-right">Preço Atual</th>
-                    <th className="px-6 py-4 text-right">Variação</th>
-                    <th className="px-6 py-4 text-right">Saldo</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5">
-                  {mockAtivos.map((ativo) => (
-                    <tr key={ativo.ticker} className="hover:bg-white/[0.02] transition-colors">
-                      <td className="px-6 py-4">
-                        <span className="font-mono font-bold text-white">{ativo.ticker}</span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className="text-xs font-medium text-slate-400 bg-white/5 px-2.5 py-1 rounded-md">
-                          {ativo.tipo}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-right font-mono text-slate-300">
-                        R$ {ativo.preco.toFixed(2)}
-                      </td>
-                      <td className="px-6 py-4 text-right font-mono">
-                        <span className={ativo.variacao >= 0 ? "text-emerald-400" : "text-rose-400"}>
-                          {ativo.variacao >= 0 ? "+" : ""}{ativo.variacao}%
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-right font-mono font-medium text-white">
-                        R$ {ativo.saldo.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                      </td>
+              
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm whitespace-nowrap">
+                  <thead className="uppercase tracking-wider border-b border-white/5 bg-slate-950/80 text-slate-500 text-[10px] font-bold">
+                    <tr>
+                      <th className="px-6 py-4">Data</th>
+                      <th className="px-6 py-4">Ativo</th>
+                      <th className="px-6 py-4">Operação</th>
+                      <th className="px-6 py-4 text-right">Qtd</th>
+                      <th className="px-6 py-4 text-right">Preço Unit.</th>
+                      <th className="px-6 py-4 text-right">Total</th>
+                      <th className="px-6 py-4 text-center">Ações</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {transactionsList.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="px-6 py-12 text-center text-slate-500">
+                          Nenhuma transação registrada no sistema.
+                        </td>
+                      </tr>
+                    ) : (
+                      transactionsList.map((tx) => (
+                        <tr key={tx.id} className="hover:bg-white/[0.02] transition-colors group">
+                          <td className="px-6 py-4 text-slate-400 font-mono text-xs">{formatDate(tx.date)}</td>
+                          <td className="px-6 py-4">
+                            <span className="font-mono font-bold text-white">{tx.ticker}</span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className={`inline-flex px-2 py-1 rounded text-[10px] font-bold tracking-wider ${tx.type === 'BUY' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}`}>
+                              {tx.type === 'BUY' ? 'COMPRA' : 'VENDA'}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 text-right font-mono text-slate-300">{tx.quantity}</td>
+                          <td className="px-6 py-4 text-right font-mono text-slate-400">{formatCurrency(tx.price)}</td>
+                          <td className="px-6 py-4 text-right font-mono font-bold text-white">{formatCurrency(tx.quantity * tx.price)}</td>
+                          <td className="px-6 py-4 text-center">
+                            <button 
+                              onClick={() => handleDeleteTransaction(tx.id)}
+                              disabled={isDeleting === tx.id}
+                              className="p-2 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors disabled:opacity-50"
+                              title="Excluir transação"
+                            >
+                              {isDeleting === tx.id ? (
+                                <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                              ) : (
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                              )}
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
+          )}
 
         </div>
       </main>
+
+      {/* MODAL DE NOVA TRANSAÇÃO */}
+      {isModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm transition-opacity" onClick={() => setIsModalOpen(false)}></div>
+          
+          <div className="relative bg-slate-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-fade-in-up">
+            <div className="flex justify-between items-center p-6 border-b border-white/5">
+              <h3 className="text-xl font-bold text-white">Nova Transação</h3>
+              <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-white transition-colors">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <form onSubmit={handleAddTransaction} className="p-6 space-y-5">
+              <div className="flex bg-slate-950 p-1 rounded-xl border border-white/5">
+                <button type="button" onClick={() => setType('BUY')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${type === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-500 hover:text-slate-300'}`}>Compra</button>
+                <button type="button" onClick={() => setType('SELL')} className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all ${type === 'SELL' ? 'bg-rose-500/20 text-rose-400' : 'text-slate-500 hover:text-slate-300'}`}>Venda</button>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Código do Ativo</label>
+                <input type="text" value={ticker} onChange={(e) => setTicker(e.target.value)} placeholder="Ex: VGIR11" required autoCapitalize="characters" className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-white font-mono uppercase placeholder:text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-all"/>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Quantidade</label>
+                  <input type="number" min="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} placeholder="100" required className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-white font-mono placeholder:text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-all"/>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Preço (R$)</label>
+                  <input type="text" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="9,50" required className="w-full bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-white font-mono placeholder:text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-all"/>
+                </div>
+              </div>
+
+              <button type="submit" disabled={isSubmitting} className="w-full h-12 mt-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg transition-all active:scale-95 flex justify-center items-center gap-2">
+                {isSubmitting ? 'Processando...' : 'Confirmar Transação'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
