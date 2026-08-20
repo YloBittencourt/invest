@@ -48,18 +48,22 @@ export async function fetchQuote(ticker: string): Promise<Quote> {
   }
 }
 
-export function averageDividends12m(dividends?: Dividend[]): number | null {
+export function averageDividends12m(dividends?: Dividend[]): number {
   if (!dividends || !Array.isArray(dividends) || dividends.length === 0) {
-    return null;
+    return 0;
   }
 
   const oneYearAgo = new Date();
   oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
 
+  // Filtra apenas os proventos pagos nos últimos 12 meses
   const recent = dividends.filter((d) => new Date(d.paymentDate) >= oneYearAgo);
 
-  if (recent.length === 0) return null;
+  if (recent.length === 0) return 0;
 
-  const total = recent.reduce((sum, d) => sum + (d.rate || 0), 0);
-  return total / recent.length;
+  // Soma o caixa total gerado pela cota em 1 ano
+  const totalYear = recent.reduce((sum, d) => sum + (d.rate || 0), 0);
+  
+  // Divide rigorosamente por 12 para encontrar a "Renda Passiva Média Mensal"
+  return totalYear / 12;
 }
