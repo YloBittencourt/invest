@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { fetchQuote, averageDividends12m } from '../lib/brapi';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, AreaChart, Area, XAxis, CartesianGrid } from 'recharts';
 import { toast } from 'sonner';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 
 import { Sidebar } from '../components/Sidebar';
 import { TransactionModal } from '../components/TransactionModal';
@@ -34,42 +35,43 @@ const CHART_COLORS = ['#3b82f6', '#10b981', '#8b5cf6', '#f43f5e', '#f59e0b', '#0
 
 export function Dashboard() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   
   const [userName, setUserName] = useState<string>('');
   const [userId, setUserId] = useState<string>('');
   const [activeTab, setActiveTab] = useState<'overview' | 'transactions'>('overview');
-
-  const [positions, setPositions] = useState<Position[]>([]);
-  const [transactionsList, setTransactionsList] = useState<Transaction[]>([]);
-  const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(true);
-  
-  const [totalEquity, setTotalEquity] = useState(0);
-  const [totalInvested, setTotalInvested] = useState(0);
-  const [totalMonthlyDividends, setTotalMonthlyDividends] = useState(0);
-  
-  const [isDeleting, setIsDeleting] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
 
-  const loadPortfolio = async (currentUserId: string) => {
-    setIsLoadingPortfolio(true);
-    try {
+  useEffect(() => {
+    const initDashboard = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        setUserId(user.id);
+        setUserName(user.user_metadata?.full_name || user.email?.split('@')[0] || 'Investidor');
+      }
+    };
+    initDashboard();
+  }, []);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    navigate('/login');
+  };
+
+  const { data: portfolioData, isLoading: isLoadingPortfolio } = useQuery({
+    queryKey: ['portfolio', userId],
+    enabled: !!userId,
+    queryFn: async () => {
       const { data: transactions, error } = await supabase
         .from('transactions')
         .select('*')
-        .eq('user_id', currentUserId)
+        .eq('user_id', userId)
         .order('date', { ascending: false });
 
       if (error) throw error;
 
-      setTransactionsList(transactions || []);
-
       if (!transactions || transactions.length === 0) {
-        setPositions([]);
-        setTotalEquity(0);
-        setTotalInvested(0);
-        setTotalMonthlyDividends(0);
-        setIsLoadingPortfolio(false);
-        return;
+        return { positions: [], transactionsList: [], totalEquity: 0, totalInvested: 0, totalMonthlyDividends: 0 };
       }
 
       const grouped: Record<string, { quantity: number; totalCost: number }> = {};
@@ -131,72 +133,74 @@ export function Dashboard() {
         });
       }
 
-      setPositions(finalPositions.sort((a, b) => b.currentEquity - a.currentEquity));
-      setTotalEquity(calcEquity); setTotalInvested(calcInvested); setTotalMonthlyDividends(calcDividends);
-
-    } catch (err) {
-      toast.error('Não foi possível carregar a carteira.');
-    } finally {
-      setIsLoadingPortfolio(false);
+      return {
+        positions: finalPositions.sort((a, b) => b.currentEquity - a.currentEquity),
+        transactionsList: transactions as Transaction[],
+        totalEquity: calcEquity,
+        totalInvested: calcInvested,
+        totalMonthlyDividends: calcDividends
+      };
     }
-  };
+  });
 
-  useEffect(() => {
-    const initDashboard = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        setUserId(user.id);
-        setUserName(user.user_metadata?.full_name || user.email?.split('@')[0] || 'Investidor');
-        await loadPortfolio(user.id);
-      }
-    };
-    initDashboard();
-  }, []);
+  const addTransactionMutation = useMutation({
+    mutationFn: async (data: any) => {
+      const { error } = await supabase.from('transactions').insert([
+        { 
+          user_id: userId, 
+          ticker: data.ticker,
+          type: data.type,
+          quantity: data.quantity,
+          price: data.price,
+          date: data.date // <-- Agora obedece a data informada pelo usuário no modal
+        }
+      ]);
+      if (error) throw error;
+    },
+    onSuccess: (_, variables) => {
+      toast.success(`${variables.quantity} cotas de ${variables.ticker} registradas com sucesso!`);
+      setIsModalOpen(false);
+      queryClient.invalidateQueries({ queryKey: ['portfolio', userId] });
+    },
+    onError: () => toast.error('Erro ao salvar a transação.')
+  });
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-    navigate('/login');
-  };
-
-  const handleAddTransaction = async (data: { ticker: string; type: 'BUY' | 'SELL'; quantity: number; price: number }) => {
-    const { error } = await supabase.from('transactions').insert([
-      {
-        user_id: userId,
-        ticker: data.ticker,
-        type: data.type,
-        quantity: data.quantity,
-        price: data.price,
-        date: new Date().toISOString().split('T')[0]
-      }
-    ]);
-
-    if (error) {
-      toast.error('Erro ao salvar a transação no banco de dados.');
-      throw error;
-    }
-
-    setIsModalOpen(false);
-    toast.success(`${data.quantity} cotas de ${data.ticker} registradas com sucesso!`);
-    await loadPortfolio(userId);
-  };
-
-  const handleDeleteTransaction = async (transactionId: string) => {
-    if (!window.confirm("Tem certeza que deseja excluir esta transação?")) return;
-
-    setIsDeleting(transactionId);
-    try {
+  const deleteTransactionMutation = useMutation({
+    mutationFn: async (transactionId: string) => {
       const { error } = await supabase.from('transactions').delete().eq('id', transactionId);
       if (error) throw error;
+    },
+    onSuccess: () => {
       toast.success('Transação excluída e portfólio recalculado.');
-      await loadPortfolio(userId);
-    } catch (error: any) {
-      toast.error("Falha ao excluir a transação.");
-    } finally {
-      setIsDeleting(null);
-    }
-  };
+      queryClient.invalidateQueries({ queryKey: ['portfolio', userId] });
+    },
+    onError: () => toast.error('Falha ao excluir a transação.')
+  });
 
-  // PROGRAMAÇÃO DEFENSIVA: Formatadores Blindados contra undefined e null
+  const { positions = [], transactionsList = [], totalEquity = 0, totalInvested = 0, totalMonthlyDividends = 0 } = portfolioData || {};
+
+  const historyChartData = useMemo(() => {
+    if (!transactionsList.length) return [];
+    
+    const reversed = [...transactionsList].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    
+    let accumulated = 0;
+    const monthlyData: Record<string, number> = {};
+
+    reversed.forEach(tx => {
+      const dateObj = new Date(tx.date);
+      const monthYear = `${String(dateObj.getMonth() + 1).padStart(2, '0')}/${dateObj.getFullYear().toString().slice(-2)}`;
+      
+      const value = tx.quantity * tx.price;
+      if (tx.type === 'BUY') accumulated += value;
+      if (tx.type === 'SELL') accumulated -= value;
+
+      monthlyData[monthYear] = accumulated;
+    });
+
+    return Object.entries(monthlyData).map(([date, investido]) => ({ date, investido }));
+  }, [transactionsList]);
+
   const formatCurrency = (value?: number) => {
     if (typeof value !== 'number' || isNaN(value)) return 'R$ 0,00';
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
@@ -214,18 +218,44 @@ export function Dashboard() {
       const parts = datePart.split('-');
       if (parts.length !== 3) return datePart;
       return `${parts[2]}/${parts[1]}/${parts[0]}`;
-    } catch (e) {
-      return dateString;
-    }
+    } catch (e) { return dateString; }
   };
 
   const totalProfitability = totalInvested > 0 ? ((totalEquity / totalInvested) - 1) * 100 : 0;
   const isGlobalGain = totalProfitability >= 0;
   const chartData = positions.map(pos => ({ name: pos.ticker, value: pos.currentEquity }));
 
+  if (isLoadingPortfolio) {
+    return (
+      <div className="min-h-screen bg-[#0a0f1c] flex font-sans text-slate-300 relative">
+        <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} onLogout={handleLogout} />
+        <main className="flex-1 flex flex-col h-screen overflow-y-auto">
+          <header className="h-16 flex items-center justify-between px-8 border-b border-white/5 bg-[#0a0f1c]/80 backdrop-blur-md sticky top-0 z-20">
+            <div className="w-48 h-6 bg-slate-800 rounded animate-pulse"></div>
+            <div className="w-32 h-9 bg-slate-800 rounded-lg animate-pulse"></div>
+          </header>
+          <div className="p-8 max-w-6xl mx-auto w-full">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+              {[1, 2, 3, 4].map(i => (
+                <div key={i} className="bg-slate-900 border border-white/5 p-6 rounded-2xl h-[120px] animate-pulse flex flex-col justify-center">
+                  <div className="w-24 h-3 bg-slate-800 rounded mb-4"></div>
+                  <div className="w-32 h-8 bg-slate-800 rounded"></div>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+              <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl h-[300px] animate-pulse"></div>
+              <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl h-[300px] animate-pulse"></div>
+            </div>
+            <div className="bg-slate-900 border border-white/5 rounded-2xl h-[400px] animate-pulse"></div>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0a0f1c] flex font-sans text-slate-300 relative">
-      
       <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} onLogout={handleLogout} />
 
       <main className="flex-1 flex flex-col h-screen overflow-y-auto">
@@ -241,22 +271,21 @@ export function Dashboard() {
           
           {activeTab === 'overview' && (
             <>
-              {/* GRID DE CARTÕES */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
                 <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm relative overflow-hidden">
                   <div className="absolute -right-10 -bottom-10 w-32 h-32 bg-blue-500/10 blur-3xl rounded-full"></div>
                   <p className="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest relative z-10">Patrimônio Total</p>
-                  <p className="text-2xl font-mono font-bold text-white tracking-tight relative z-10">{isLoadingPortfolio ? '...' : formatCurrency(totalEquity)}</p>
+                  <p className="text-2xl font-mono font-bold text-white tracking-tight relative z-10">{formatCurrency(totalEquity)}</p>
                 </div>
                 <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm">
                   <p className="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest">Valor Investido</p>
-                  <p className="text-2xl font-mono font-bold text-white tracking-tight">{isLoadingPortfolio ? '...' : formatCurrency(totalInvested)}</p>
+                  <p className="text-2xl font-mono font-bold text-white tracking-tight">{formatCurrency(totalInvested)}</p>
                 </div>
                 <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm relative overflow-hidden">
                   <div className="absolute -right-10 -bottom-10 w-32 h-32 bg-purple-500/10 blur-3xl rounded-full"></div>
                   <p className="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest relative z-10">Média de Proventos</p>
                   <p className="text-2xl font-mono font-bold text-purple-400 tracking-tight relative z-10">
-                    {isLoadingPortfolio ? '...' : formatCurrency(totalMonthlyDividends)}
+                    {formatCurrency(totalMonthlyDividends)}
                     <span className="text-xs text-slate-500 font-sans ml-1 font-normal tracking-normal">/mês</span>
                   </p>
                 </div>
@@ -264,32 +293,71 @@ export function Dashboard() {
                   <div className={`absolute -right-10 -bottom-10 w-32 h-32 blur-3xl rounded-full ${isGlobalGain ? 'bg-emerald-500/10' : 'bg-rose-500/10'}`}></div>
                   <p className="text-slate-500 text-xs font-semibold mb-2 uppercase tracking-widest relative z-10">Rentabilidade</p>
                   <p className={`text-2xl font-mono font-bold tracking-tight relative z-10 ${isGlobalGain ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {isLoadingPortfolio ? '...' : <>{isGlobalGain ? '+' : ''}{formatPercent(totalProfitability)}</>}
+                    {isGlobalGain ? '+' : ''}{formatPercent(totalProfitability)}
                   </p>
                 </div>
               </div>
 
-              {!isLoadingPortfolio && positions.length > 0 && (
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-                  <div className="lg:col-span-1 bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm flex flex-col items-center">
-                    <p className="text-slate-500 text-sm font-semibold mb-4 uppercase tracking-widest self-start w-full border-b border-white/5 pb-4">Composição</p>
-                    <div className="w-full h-[220px] relative">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie data={chartData} innerRadius={65} outerRadius={90} paddingAngle={5} dataKey="value" stroke="none">
-                            {chartData.map((entry, index) => (<Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />))}
-                          </Pie>
-                          <Tooltip formatter={(value: number) => formatCurrency(value)} contentStyle={{ backgroundColor: '#020617', borderColor: '#1e293b', color: '#f8fafc', borderRadius: '0.75rem', padding: '12px' }} itemStyle={{ color: '#e2e8f0', fontWeight: 'bold' }} />
-                        </PieChart>
-                      </ResponsiveContainer>
-                      <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                        <span className="text-xs text-slate-500 font-bold">Ativos</span>
-                        <span className="text-2xl font-mono font-bold text-white">{positions.length}</span>
+              {positions.length > 0 ? (
+                <>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+                    
+                    <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm flex flex-col items-center">
+                      <p className="text-slate-500 text-sm font-semibold mb-4 uppercase tracking-widest self-start w-full border-b border-white/5 pb-4">
+                        Composição da Carteira
+                      </p>
+                      <div className="w-full h-[220px] relative">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <PieChart>
+                            <Pie data={chartData} innerRadius={65} outerRadius={90} paddingAngle={5} dataKey="value" stroke="none">
+                              {chartData.map((entry, index) => (<Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />))}
+                            </Pie>
+                            <Tooltip formatter={(value: number) => formatCurrency(value)} contentStyle={{ backgroundColor: '#020617', borderColor: '#1e293b', color: '#f8fafc', borderRadius: '0.75rem', padding: '12px' }} itemStyle={{ color: '#e2e8f0', fontWeight: 'bold' }} />
+                          </PieChart>
+                        </ResponsiveContainer>
+                        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                          <span className="text-xs text-slate-500 font-bold">Ativos</span>
+                          <span className="text-2xl font-mono font-bold text-white">{positions.length}</span>
+                        </div>
+                      </div>
+                      <div className="w-full flex flex-wrap gap-3 mt-4 justify-center">
+                        {chartData.map((entry, index) => (
+                          <div key={entry.name} className="flex items-center gap-1.5 text-xs font-mono">
+                            <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: CHART_COLORS[index % CHART_COLORS.length] }}></div>
+                            <span className="text-slate-400">{entry.name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-900 border border-white/5 p-6 rounded-2xl shadow-sm flex flex-col">
+                      <p className="text-slate-500 text-sm font-semibold mb-4 uppercase tracking-widest self-start w-full border-b border-white/5 pb-4">
+                        Evolução de Aportes
+                      </p>
+                      <div className="w-full flex-1 min-h-[220px]">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <AreaChart data={historyChartData} margin={{ top: 10, right: 0, left: 0, bottom: 0 }}>
+                            <defs>
+                              <linearGradient id="colorInvestido" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4}/>
+                                <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                              </linearGradient>
+                            </defs>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#ffffff0a" vertical={false} />
+                            <XAxis dataKey="date" stroke="#64748b" fontSize={10} tickLine={false} axisLine={false} />
+                            <Tooltip 
+                              formatter={(value: number) => [formatCurrency(value), 'Aportado']}
+                              contentStyle={{ backgroundColor: '#020617', borderColor: '#1e293b', color: '#f8fafc', borderRadius: '0.75rem', padding: '12px' }}
+                              itemStyle={{ color: '#e2e8f0', fontWeight: 'bold' }}
+                            />
+                            <Area type="monotone" dataKey="investido" stroke="#3b82f6" strokeWidth={3} fillOpacity={1} fill="url(#colorInvestido)" />
+                          </AreaChart>
+                        </ResponsiveContainer>
                       </div>
                     </div>
                   </div>
 
-                  <div className="lg:col-span-2 bg-slate-900 border border-white/5 rounded-2xl overflow-hidden shadow-sm flex flex-col">
+                  <div className="bg-slate-900 border border-white/5 rounded-2xl overflow-hidden shadow-sm flex flex-col mb-8">
                     <p className="text-slate-500 text-sm font-semibold p-6 pb-4 uppercase tracking-widest border-b border-white/5">Posições Consolidadas</p>
                     <div className="overflow-x-auto flex-1">
                       <table className="w-full text-left text-sm whitespace-nowrap">
@@ -334,19 +402,26 @@ export function Dashboard() {
                       </table>
                     </div>
                   </div>
+                </>
+              ) : (
+                <div className="w-full bg-slate-900/50 border border-white/5 border-dashed rounded-3xl p-12 flex flex-col items-center justify-center text-center">
+                  <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mb-4 border border-white/5">
+                    <svg className="w-8 h-8 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">Nenhum ativo cadastrado</h3>
+                  <p className="text-slate-400 max-w-md mx-auto mb-6">Comece a construir sua carteira registrando sua primeira compra.</p>
+                  <button onClick={() => setIsModalOpen(true)} className="bg-slate-800 hover:bg-slate-700 text-white px-6 py-3 rounded-xl font-medium transition-colors border border-white/10 shadow-sm">
+                    Registrar primeira transação
+                  </button>
                 </div>
               )}
             </>
           )}
 
-          {/* ================= ABA: TRANSAÇÕES ================= */}
           {activeTab === 'transactions' && (
             <div className="bg-slate-900 border border-white/5 rounded-2xl overflow-hidden shadow-xl animate-fade-in-up">
                <div className="p-6 border-b border-white/5 flex items-center justify-between bg-slate-950/30">
                 <h3 className="font-bold text-white">Histórico de Movimentações</h3>
-                <span className="text-xs font-medium text-slate-500 px-3 py-1 bg-slate-800 rounded-full border border-white/5">
-                  {transactionsList.length} Registros
-                </span>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm whitespace-nowrap">
@@ -381,12 +456,10 @@ export function Dashboard() {
                           <td className="px-6 py-4 text-right font-mono text-slate-400">{formatCurrency(tx.price)}</td>
                           <td className="px-6 py-4 text-right font-mono font-bold text-white">{formatCurrency((tx.quantity || 0) * (tx.price || 0))}</td>
                           <td className="px-6 py-4 text-center">
-                            <button onClick={() => handleDeleteTransaction(tx.id)} disabled={isDeleting === tx.id} className="p-2 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors disabled:opacity-50">
-                              {isDeleting === tx.id ? (
-                                <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                              ) : (
+                            <button onClick={() => {
+                              if(window.confirm("Tem certeza?")) deleteTransactionMutation.mutate(tx.id);
+                            }} disabled={deleteTransactionMutation.isPending} className="p-2 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors disabled:opacity-50">
                                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                              )}
                             </button>
                           </td>
                         </tr>
@@ -401,7 +474,12 @@ export function Dashboard() {
         </div>
       </main>
 
-      <TransactionModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} onSubmit={handleAddTransaction} />
+      <TransactionModal 
+        isOpen={isModalOpen} 
+        onClose={() => setIsModalOpen(false)} 
+        onSubmit={async (data) => addTransactionMutation.mutateAsync(data)} 
+      />
+
     </div>
   );
 }
